@@ -7,6 +7,7 @@
 #include "sensor_msgs/msg/image.hpp"
 #include "std_msgs/msg/header.hpp"
 #include "visualization_msgs/msg/marker.hpp"
+#include "visualization_msgs/msg/marker_array.hpp"
 
 
 namespace rviz_doodles
@@ -37,9 +38,18 @@ namespace rviz_doodles
 //    cv::Ptr<cv::aruco::Dictionary> dictionary_ = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_6X6_250);
 //    cv::Ptr<cv::aruco::DetectorParameters> detectorParameters_ = cv::aruco::DetectorParameters::create();
 
-    uint32_t shape_;
-    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr basic_marker_pub_;
+    const int timer_inverval_milliseconds_ = 100;
+
+    const int draw_basic_marker_interval_milliseconds_ = 2000;
+    const int draw_basic_marker_skip_count_ = draw_basic_marker_interval_milliseconds_ / timer_inverval_milliseconds_;
+    const int draw_axes_interval_milliseconds_ = 500;
+    const int draw_axes_skip_count_ = draw_axes_interval_milliseconds_ / timer_inverval_milliseconds_;
+
+    uint32_t basic_marker_shape_;
+    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_pub_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;
     rclcpp::TimerBase::SharedPtr timer_sub_;
+    int skip_count_ = 0;
 
   public:
 
@@ -64,19 +74,94 @@ namespace rviz_doodles
 //
 //      detectorParameters_->doCornerRefinement = true;
 
-      shape_ = visualization_msgs::msg::Marker::CUBE;
+      basic_marker_shape_ = visualization_msgs::msg::Marker::CUBE;
 
-      basic_marker_pub_ = create_publisher<visualization_msgs::msg::Marker>("basic_marker", 1);
+      marker_pub_ = create_publisher<visualization_msgs::msg::Marker>("marker", 10);
+      markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("markers", 10);
 
       auto timer_pub_cb = std::bind(&RvizDoodlesNode::timer_callback, this);
-      timer_sub_ = create_wall_timer(std::chrono::milliseconds(2000), timer_pub_cb);
+      timer_sub_ = create_wall_timer(std::chrono::milliseconds(timer_inverval_milliseconds_), timer_pub_cb);
 
       RCLCPP_INFO(get_logger(), "rviz_doodles_node ready");
     }
 
   private:
 
-    void draw_basic_marker()
+    int draw_axes(const std::string & ns, int id)
+    {
+      visualization_msgs::msg::MarkerArray markers;
+      visualization_msgs::msg::Marker marker;
+
+      // Set the frame ID and timestamp.  See the TF tutorials for information on these.
+      marker.header.frame_id = "map";
+      marker.header.stamp = this->now();
+
+      // Set the namespace and id for this marker.  This serves to create a unique ID
+      // Any marker sent with the same namespace and id will overwrite the old one
+      marker.ns = ns + ".axes";
+      marker.id = id;
+
+      // Set the marker type.
+      marker.type = visualization_msgs::msg::Marker::ARROW;
+
+      marker.pose.position.x = 0;
+      marker.pose.position.y = 0;
+      marker.pose.position.z = 0;
+      marker.pose.orientation.x = 0.0;
+      marker.pose.orientation.y = 0.0;
+      marker.pose.orientation.z = 0.0;
+      marker.pose.orientation.w = 1.0;
+
+      // Set the scale of the marker -- 1x1x1 here means 1m on a side
+      marker.scale.x = 1.0;
+      marker.scale.y = 0.05;
+      marker.scale.z = 0.05;
+
+      // Set the color -- be sure to set alpha to something non-zero!
+      marker.color.r = 1.0f;
+      marker.color.g = 0.0f;
+      marker.color.b = 0.0f;
+      marker.color.a = 1.0;
+
+      markers.markers.push_back(marker);
+
+
+      marker.id = id + 1;
+
+      marker.pose.orientation.x = 0.0;
+      marker.pose.orientation.y = 0.0;
+      marker.pose.orientation.z = 0.707;
+      marker.pose.orientation.w = 0.707;
+
+      // Set the color
+      marker.color.r = 0.0f;
+      marker.color.g = 1.0f;
+      marker.color.b = 0.0f;
+
+      markers.markers.push_back(marker);
+
+
+      marker.id = id + 2;
+
+      marker.pose.orientation.x = 0.0;
+      marker.pose.orientation.y = -0.707;
+      marker.pose.orientation.z = 0.0;
+      marker.pose.orientation.w = 0.707;
+
+      // Set the color
+      marker.color.r = 0.0f;
+      marker.color.g = 0.0f;
+      marker.color.b = 1.0f;
+
+      markers.markers.push_back(marker);
+
+
+      markers_pub_->publish(markers);
+
+      return draw_axes_skip_count_;
+    }
+
+    int draw_basic_marker(const std::string ns)
     {
       visualization_msgs::msg::Marker marker;
 
@@ -86,11 +171,11 @@ namespace rviz_doodles
 
       // Set the namespace and id for this marker.  This serves to create a unique ID
       // Any marker sent with the same namespace and id will overwrite the old one
-      marker.ns = "basic_shapes";
+      marker.ns = ns + ".basic_shapes";
       marker.id = 0;
 
       // Set the marker type.  Initially this is CUBE, and cycles between that and SPHERE, ARROW, and CYLINDER
-      marker.type = shape_;
+      marker.type = basic_marker_shape_;
 
       // Set the marker action.  Options are ADD and DELETE
       marker.action = visualization_msgs::msg::Marker::ADD;
@@ -118,30 +203,35 @@ namespace rviz_doodles
 //      marker.lifetime = 1000;
 
       // Publish the marker
-      basic_marker_pub_->publish(marker);
+      marker_pub_->publish(marker);
 
       // Cycle between different shapes
-      switch (shape_)
+      switch (basic_marker_shape_)
       {
         case visualization_msgs::msg::Marker::CUBE:
-          shape_ = visualization_msgs::msg::Marker::SPHERE;
+          basic_marker_shape_ = visualization_msgs::msg::Marker::SPHERE;
           break;
         case visualization_msgs::msg::Marker::SPHERE:
-          shape_ = visualization_msgs::msg::Marker::ARROW;
+          basic_marker_shape_ = visualization_msgs::msg::Marker::ARROW;
           break;
         case visualization_msgs::msg::Marker::ARROW:
-          shape_ = visualization_msgs::msg::Marker::CYLINDER;
+          basic_marker_shape_ = visualization_msgs::msg::Marker::CYLINDER;
           break;
         case visualization_msgs::msg::Marker::CYLINDER:
-          shape_ = visualization_msgs::msg::Marker::CUBE;
+          basic_marker_shape_ = visualization_msgs::msg::Marker::CUBE;
           break;
       }
 
+      return draw_basic_marker_skip_count_;
     }
 
     void timer_callback(void)
     {
-      draw_basic_marker();
+      auto ns = "rviz_doodle";
+      if (skip_count_-- <= 0) {
+//        skip_count_ = draw_basic_marker(ns);
+        skip_count_ = draw_axes(ns, 100);
+      }
     }
 
 #if 0

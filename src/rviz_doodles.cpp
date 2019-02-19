@@ -3,11 +3,14 @@
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
+#include "geometry_msgs/msg/transform_stamped.hpp"
 #include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/msg/image.hpp"
 #include "std_msgs/msg/header.hpp"
 #include "visualization_msgs/msg/marker.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
+
+#include "TransformWithCovariance.hpp"
 
 
 namespace rviz_doodles
@@ -87,13 +90,16 @@ namespace rviz_doodles
 
   private:
 
-    int draw_axes(const std::string & ns, int id)
+    void draw_axes(const std::string &frame_id, const std::string &ns, int id, const TransformWithCovariance &t)
     {
+      // Adjust the id space to allow for three axis arrows
+      id *= 3;
+
       visualization_msgs::msg::MarkerArray markers;
       visualization_msgs::msg::Marker marker;
 
       // Set the frame ID and timestamp.  See the TF tutorials for information on these.
-      marker.header.frame_id = "map";
+      marker.header.frame_id = frame_id;
       marker.header.stamp = this->now();
 
       // Set the namespace and id for this marker.  This serves to create a unique ID
@@ -104,13 +110,19 @@ namespace rviz_doodles
       // Set the marker type.
       marker.type = visualization_msgs::msg::Marker::ARROW;
 
-      marker.pose.position.x = 0;
-      marker.pose.position.y = 0;
-      marker.pose.position.z = 0;
-      marker.pose.orientation.x = 0.0;
-      marker.pose.orientation.y = 0.0;
-      marker.pose.orientation.z = 0.0;
-      marker.pose.orientation.w = 1.0;
+      auto c = t.transform().getOrigin();
+      auto q = t.transform().getRotation();
+
+      marker.pose.position.x = c.x();
+      marker.pose.position.y = c.y();
+      marker.pose.position.z = c.z();
+
+      auto qx = tf2::Quaternion(0., 0., 0., 1.);
+      auto qx1 = q * qx;
+      marker.pose.orientation.x = qx1.x();
+      marker.pose.orientation.y = qx1.y();
+      marker.pose.orientation.z = qx1.z();
+      marker.pose.orientation.w = qx1.w();
 
       // Set the scale of the marker -- 1x1x1 here means 1m on a side
       marker.scale.x = 1.0;
@@ -128,10 +140,12 @@ namespace rviz_doodles
 
       marker.id = id + 1;
 
-      marker.pose.orientation.x = 0.0;
-      marker.pose.orientation.y = 0.0;
-      marker.pose.orientation.z = 0.707;
-      marker.pose.orientation.w = 0.707;
+      auto qy = tf2::Quaternion(0., 0., TF2SIMDSQRT12, TF2SIMDSQRT12);
+      auto qy1 = q * qy;
+      marker.pose.orientation.x = qy1.x();
+      marker.pose.orientation.y = qy1.y();
+      marker.pose.orientation.z = qy1.z();
+      marker.pose.orientation.w = qy1.w();
 
       // Set the color
       marker.color.r = 0.0f;
@@ -147,6 +161,12 @@ namespace rviz_doodles
       marker.pose.orientation.y = -0.707;
       marker.pose.orientation.z = 0.0;
       marker.pose.orientation.w = 0.707;
+      auto qz = tf2::Quaternion(0., -TF2SIMDSQRT12, 0., TF2SIMDSQRT12);
+      auto qz1 = q * qz;
+      marker.pose.orientation.x = qz1.x();
+      marker.pose.orientation.y = qz1.y();
+      marker.pose.orientation.z = qz1.z();
+      marker.pose.orientation.w = qz1.w();
 
       // Set the color
       marker.color.r = 0.0f;
@@ -157,6 +177,21 @@ namespace rviz_doodles
 
 
       markers_pub_->publish(markers);
+    }
+
+    int draw_basic_axes(const std::string ns)
+    {
+      TransformWithCovariance t_map_map(
+        TransformWithCovariance::mu_type {0., 0., 0., 0., 0., 0.},
+        TransformWithCovariance::cov_type {});
+
+      draw_axes("map", ns, 0, t_map_map);
+
+      TransformWithCovariance t_map_drone(
+        TransformWithCovariance::mu_type {0.5, 0.5, 0.5, 0., 0., TF2SIMD_PI / 8},
+        TransformWithCovariance::cov_type {});
+
+      draw_axes("map", ns, 1, t_map_drone);
 
       return draw_axes_skip_count_;
     }
@@ -230,7 +265,7 @@ namespace rviz_doodles
       auto ns = "rviz_doodle";
       if (skip_count_-- <= 0) {
 //        skip_count_ = draw_basic_marker(ns);
-        skip_count_ = draw_axes(ns, 100);
+        skip_count_ = draw_basic_axes(ns);
       }
     }
 

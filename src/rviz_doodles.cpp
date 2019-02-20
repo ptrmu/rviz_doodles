@@ -12,117 +12,130 @@
 
 #include "TransformWithCovariance.hpp"
 
+#include <map>
 
 namespace rviz_doodles
 {
 
 //=============
-// RvizDoodlesNode class
+// Context struct
 //=============
 
-  class RvizDoodlesNode : public rclcpp::Node
+  struct Context
   {
-//    Map map_;
-//    Localizer localizer_;
-//
-//    rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
-//    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_raw_sub_;
-//    rclcpp::Subscription<flock_vlam_msgs::msg::Map>::SharedPtr map_sub_;
-//
-//    rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr camera_pose_pub_;
-//    rclcpp::Publisher<flock_vlam_msgs::msg::Observations>::SharedPtr observations_pub_;
-//    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_marked_pub_;
-//
-//    bool have_camera_info_{false};
-//    sensor_msgs::msg::CameraInfo cameraInfo_;
-//    cv::Mat camera_matrix_;
-//    cv::Mat dist_coeffs_;
-//
-//    cv::Ptr<cv::aruco::Dictionary> dictionary_ = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_6X6_250);
-//    cv::Ptr<cv::aruco::DetectorParameters> detectorParameters_ = cv::aruco::DetectorParameters::create();
+    rclcpp::Node &node_;
 
-    const int timer_inverval_milliseconds_ = 100;
+    const static int timer_inverval_milliseconds_ = 100;
 
-    const int draw_basic_marker_interval_milliseconds_ = 2000;
-    const int draw_basic_marker_skip_count_ = draw_basic_marker_interval_milliseconds_ / timer_inverval_milliseconds_;
-    const int draw_axes_interval_milliseconds_ = 500;
-    const int draw_axes_skip_count_ = draw_axes_interval_milliseconds_ / timer_inverval_milliseconds_;
-
-    uint32_t basic_marker_shape_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;
-    rclcpp::TimerBase::SharedPtr timer_sub_;
-    int skip_count_ = 0;
 
-  public:
-
-    explicit RvizDoodlesNode()
-      : Node("rviz_doodles_node")
+    Context(rclcpp::Node &node)
+      : node_(node)
     {
-//      // ROS subscriptions
-//      auto cameraInfo_cb = std::bind(&RvizDoodlesNode::camera_info_callback, this, std::placeholders::_1);
-//      camera_info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>("camera_info", cameraInfo_cb);
-//
-//      auto image_raw_sub_cb = std::bind(&RvizDoodlesNode::image_callback, this, std::placeholders::_1);
-//      image_raw_sub_ = create_subscription<sensor_msgs::msg::Image>("image_raw", image_raw_sub_cb);
-//
-//      auto map_sub_cb = std::bind(&RvizDoodlesNode::map_callback, this, std::placeholders::_1);
-//      map_sub_ = create_subscription<flock_vlam_msgs::msg::Map>("/flock_map", map_sub_cb);
-//
-//
-//      // ROS publishers
-//      camera_pose_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("camera_pose", 1);
-//      observations_pub_ = create_publisher<flock_vlam_msgs::msg::Observations>("/flock_observations", 1);
-//      image_marked_pub_ = create_publisher<sensor_msgs::msg::Image>("image_marked", 1);
-//
-//      detectorParameters_->doCornerRefinement = true;
+      marker_pub_ = node_.create_publisher<visualization_msgs::msg::Marker>("marker", 10);
+      markers_pub_ = node_.create_publisher<visualization_msgs::msg::MarkerArray>("markers", 10);
+    }
+  };
 
-      basic_marker_shape_ = visualization_msgs::msg::Marker::CUBE;
+//=============
+// TransformHolder struct
+//=============
 
-      marker_pub_ = create_publisher<visualization_msgs::msg::Marker>("marker", 10);
-      markers_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("markers", 10);
+  struct TransformHolder
+  {
+    const std::string frame_id_;
+    const std::string parent_frame_id_;
+    TransformWithCovariance::mu_type t_parent_self_;
 
-      auto timer_pub_cb = std::bind(&RvizDoodlesNode::timer_callback, this);
-      timer_sub_ = create_wall_timer(std::chrono::milliseconds(timer_inverval_milliseconds_), timer_pub_cb);
+    TransformHolder(const std::string &frame_id, const std::string &parent_frame_id,
+                    TransformWithCovariance::mu_type &t_parent_self)
+      : frame_id_(frame_id), parent_frame_id_(parent_frame_id),
+        t_parent_self_(t_parent_self)
+    {
+    }
+  };
 
-      RCLCPP_INFO(get_logger(), "rviz_doodles_node ready");
+//=============
+// Emitter interface
+//=============
+
+  class IEmitter
+  {
+    virtual void do_emit(void) = 0;
+
+  protected:
+    std::shared_ptr<Context> cxt_;
+    const std::string ns_;
+
+    std::map<std::string, std::shared_ptr<TransformHolder>> transforms_;
+    std::vector<visualization_msgs::msg::Marker> markers_;
+
+    IEmitter(std::shared_ptr<Context> &cxt, const std::string &ns)
+      : ns_(ns)
+    {
+      cxt_ = cxt;
     }
 
-  private:
+    ~IEmitter()
+    {}
 
-    void draw_axes(const std::string &frame_id, const std::string &ns, int id, const TransformWithCovariance &t)
+  public:
+    void emit(void)
     {
-      // Adjust the id space to allow for three axis arrows
-      id *= 3;
+      do_emit();
+    }
 
-      visualization_msgs::msg::MarkerArray markers;
+    void add_transform(const std::string &frame_id, const std::string &parent_frame_id,
+                       TransformWithCovariance::mu_type t_parent_self)
+    {
+      auto th = std::make_shared<TransformHolder>(frame_id, parent_frame_id, t_parent_self);
+      transforms_[frame_id] = th;
+    }
+
+    void add_marker(const std::string &frame_id, const std::string &ns, const visualization_msgs::msg::Marker &marker)
+    {
+      visualization_msgs::msg::Marker m(marker);
+
+      m.header.frame_id = frame_id;
+
+      // Build up a ns for this marker by concatenating frame_ids. Note that this requires that
+      // the transforms be added before the markers are added.
+      std::string my_ns = ns;
+      std::string my_frame_id = frame_id;
+      while (my_frame_id.length()) {
+        my_ns.append(".");
+        my_ns.append(my_frame_id);
+        my_frame_id = transforms_.count(my_frame_id) ? transforms_[my_frame_id]->parent_frame_id_ : "";
+      }
+      m.ns = my_ns;
+
+      markers_.push_back(m);
+    }
+
+    void add_axes(const std::string &frame_id, const std::string &ns)
+    {
       visualization_msgs::msg::Marker marker;
 
-      // Set the frame ID and timestamp.  See the TF tutorials for information on these.
-      marker.header.frame_id = frame_id;
-      marker.header.stamp = this->now();
+      // Set the frame ID and timestamp. The frame_id will be set when this
+      //  marker is added.
+      marker.header.stamp = cxt_->node_.now();
 
-      // Set the namespace and id for this marker.  This serves to create a unique ID
-      // Any marker sent with the same namespace and id will overwrite the old one
-      marker.ns = ns + ".axes";
-      marker.id = id;
+      // Set the namespace and id for this marker. The ns will be set when this
+      // marker is added
+      marker.id = 0;
 
       // Set the marker type.
       marker.type = visualization_msgs::msg::Marker::ARROW;
 
-      auto c = t.transform().getOrigin();
-      auto q = t.transform().getRotation();
+      marker.pose.position.x = 0.;
+      marker.pose.position.y = 0.;
+      marker.pose.position.z = 0.;
 
-      marker.pose.position.x = c.x();
-      marker.pose.position.y = c.y();
-      marker.pose.position.z = c.z();
-
-      auto qx = tf2::Quaternion(0., 0., 0., 1.);
-      auto qx1 = q * qx;
-      marker.pose.orientation.x = qx1.x();
-      marker.pose.orientation.y = qx1.y();
-      marker.pose.orientation.z = qx1.z();
-      marker.pose.orientation.w = qx1.w();
+      marker.pose.orientation.x = 0.;
+      marker.pose.orientation.y = 0.;
+      marker.pose.orientation.z = 0.;
+      marker.pose.orientation.w = 1.;
 
       // Set the scale of the marker -- 1x1x1 here means 1m on a side
       marker.scale.x = 1.0;
@@ -135,66 +148,191 @@ namespace rviz_doodles
       marker.color.b = 0.0f;
       marker.color.a = 1.0;
 
-      markers.markers.push_back(marker);
+      add_marker(frame_id, ns, marker);
 
 
-      marker.id = id + 1;
+      marker.id = 1;
 
-      auto qy = tf2::Quaternion(0., 0., TF2SIMDSQRT12, TF2SIMDSQRT12);
-      auto qy1 = q * qy;
-      marker.pose.orientation.x = qy1.x();
-      marker.pose.orientation.y = qy1.y();
-      marker.pose.orientation.z = qy1.z();
-      marker.pose.orientation.w = qy1.w();
+      marker.pose.orientation.x = 0.;
+      marker.pose.orientation.y = 0.;
+      marker.pose.orientation.z = TF2SIMDSQRT12;
+      marker.pose.orientation.w = TF2SIMDSQRT12;
 
       // Set the color
       marker.color.r = 0.0f;
       marker.color.g = 1.0f;
       marker.color.b = 0.0f;
 
-      markers.markers.push_back(marker);
+      add_marker(frame_id, ns, marker);
 
 
-      marker.id = id + 2;
+      marker.id = 2;
 
-      marker.pose.orientation.x = 0.0;
-      marker.pose.orientation.y = -0.707;
-      marker.pose.orientation.z = 0.0;
-      marker.pose.orientation.w = 0.707;
-      auto qz = tf2::Quaternion(0., -TF2SIMDSQRT12, 0., TF2SIMDSQRT12);
-      auto qz1 = q * qz;
-      marker.pose.orientation.x = qz1.x();
-      marker.pose.orientation.y = qz1.y();
-      marker.pose.orientation.z = qz1.z();
-      marker.pose.orientation.w = qz1.w();
+      marker.pose.orientation.x = 0.;
+      marker.pose.orientation.y = -TF2SIMDSQRT12;
+      marker.pose.orientation.z = 0.;
+      marker.pose.orientation.w = TF2SIMDSQRT12;
 
       // Set the color
       marker.color.r = 0.0f;
       marker.color.g = 0.0f;
       marker.color.b = 1.0f;
 
-      markers.markers.push_back(marker);
+      add_marker(frame_id, ns, marker);
+    }
+  };
 
+//=============
+// MapFrameEmitter
+//=============
 
-      markers_pub_->publish(markers);
+  class MapFrameEmitter : public IEmitter
+  {
+    void do_emit(void)
+    {
+      visualization_msgs::msg::MarkerArray markers;
+
+      // Loop over all the markers, adjust their transformation, and add them to the markers msg.
+      for (auto m : markers_) {
+        // m is a copy of the item in the vector so we can modify it.
+        // If the frame_id of this marker is a valid transformation, then transform the
+        // marker
+        if (transforms_.count(m.header.frame_id)) {
+          auto holder = transforms_[m.header.frame_id];
+          TransformWithCovariance t(holder->t_parent_self_, TransformWithCovariance::cov_type());
+
+          // Walk up the transform chain if there are more transforms
+          while (transforms_.count(holder->parent_frame_id_)) {
+            holder = transforms_[holder->parent_frame_id_];
+            TransformWithCovariance t1(holder->t_parent_self_, TransformWithCovariance::cov_type());
+            auto tf2_transform = t1.transform() * t.transform();
+            t = TransformWithCovariance(tf2_transform, TransformWithCovariance::cov_type());
+          }
+
+          // Do the transformation
+          auto c = t.transform().getOrigin();
+          auto q = t.transform().getRotation();
+
+          m.pose.position.x += c.x();
+          m.pose.position.y += c.y();
+          m.pose.position.z += c.z();
+
+          auto qm = tf2::Quaternion(
+            m.pose.orientation.x,
+            m.pose.orientation.y,
+            m.pose.orientation.z,
+            m.pose.orientation.w);
+          auto qm1 = q * qm;
+          m.pose.orientation.x = qm1.x();
+          m.pose.orientation.y = qm1.y();
+          m.pose.orientation.z = qm1.z();
+          m.pose.orientation.w = qm1.w();
+
+          // Set the frame_id of this marker to be the parent of the last transformation
+          m.header.frame_id = holder->parent_frame_id_;
+        }
+
+        // Add m to the markers message
+        markers.markers.push_back(m);
+      }
+
+      // And publish these markers
+      cxt_->markers_pub_->publish(markers);
     }
 
-    int draw_basic_axes(const std::string ns)
+  public:
+    MapFrameEmitter(std::shared_ptr<Context> &cxt, const std::string &ns)
+      : IEmitter(cxt, ns)
+    {}
+
+  };
+
+//=============
+// Animation interface
+//=============
+
+  class IAnimation
+  {
+  protected:
+    std::shared_ptr<Context> cxt_;
+    std::shared_ptr<IEmitter> emt_;
+
+  public:
+    IAnimation(std::shared_ptr<Context> &cxt, std::shared_ptr<IEmitter> &emt)
     {
-      TransformWithCovariance t_map_map(
-        TransformWithCovariance::mu_type {0., 0., 0., 0., 0., 0.},
-        TransformWithCovariance::cov_type {});
+      cxt_ = cxt;
+      emt_ = emt;
+    }
 
-      draw_axes("map", ns, 0, t_map_map);
+    int step(void)
+    {
+      return do_step();
+    }
 
-      TransformWithCovariance t_map_drone(
-        TransformWithCovariance::mu_type {0.5, 0.5, 0.5, 0., 0., TF2SIMD_PI / 8},
-        TransformWithCovariance::cov_type {});
+  private:
+    virtual int do_step(void) = 0;
+  };
 
-      draw_axes("map", ns, 1, t_map_drone);
+//=============
+// BasicAxes class
+//=============
 
+  class BasicAxes : public IAnimation
+  {
+    const int draw_axes_interval_milliseconds_ = 500;
+    const int draw_axes_skip_count_ = draw_axes_interval_milliseconds_ / Context::timer_inverval_milliseconds_;
+
+  public:
+    BasicAxes(std::shared_ptr<Context> &cxt, std::shared_ptr<IEmitter> &emt)
+      : IAnimation(cxt, emt)
+    {
+      emt_->add_transform("basic", "map",
+                          TransformWithCovariance::mu_type{0.5, 0.5, 0.1, 0., 0., TF2SIMD_PI / 8});
+      emt_->add_axes("map", "axes");
+      emt_->add_axes("basic", "axes");
+    }
+
+  private:
+    virtual int do_step(void)
+    {
+      emt_->emit();
       return draw_axes_skip_count_;
     }
+  };
+
+//=============
+// RvizDoodlesNode class
+//=============
+
+  class RvizDoodlesNode : public rclcpp::Node
+  {
+    const int timer_inverval_milliseconds_ = 100;
+
+    const int draw_basic_marker_interval_milliseconds_ = 2000;
+    const int draw_basic_marker_skip_count_ = draw_basic_marker_interval_milliseconds_ / timer_inverval_milliseconds_;
+
+    uint32_t basic_marker_shape_;
+    rclcpp::TimerBase::SharedPtr timer_sub_;
+    int skip_count_ = 0;
+
+    std::shared_ptr<Context> cxt_;
+    std::shared_ptr<IEmitter> emt_;
+    std::shared_ptr<IAnimation> ani_;
+
+  public:
+
+    explicit RvizDoodlesNode()
+      : Node("rviz_doodles_node")
+    {
+      basic_marker_shape_ = visualization_msgs::msg::Marker::CUBE;
+
+      auto timer_pub_cb = std::bind(&RvizDoodlesNode::timer_callback, this);
+      timer_sub_ = create_wall_timer(std::chrono::milliseconds(timer_inverval_milliseconds_), timer_pub_cb);
+
+      RCLCPP_INFO(get_logger(), "rviz_doodles_node ready");
+    }
+
+  private:
 
     int draw_basic_marker(const std::string ns)
     {
@@ -238,11 +376,10 @@ namespace rviz_doodles
 //      marker.lifetime = 1000;
 
       // Publish the marker
-      marker_pub_->publish(marker);
+      cxt_->marker_pub_->publish(marker);
 
       // Cycle between different shapes
-      switch (basic_marker_shape_)
-      {
+      switch (basic_marker_shape_) {
         case visualization_msgs::msg::Marker::CUBE:
           basic_marker_shape_ = visualization_msgs::msg::Marker::SPHERE;
           break;
@@ -262,119 +399,19 @@ namespace rviz_doodles
 
     void timer_callback(void)
     {
-      auto ns = "rviz_doodle";
+      if (!cxt_) {
+        cxt_ = std::make_shared<Context>(*this);
+      }
+      if (!emt_) {
+        emt_ = std::make_shared<MapFrameEmitter>(cxt_, "rviz_doodle");
+      }
+      if (!ani_) {
+        ani_ = std::make_shared<BasicAxes>(cxt_, emt_);
+      }
       if (skip_count_-- <= 0) {
-//        skip_count_ = draw_basic_marker(ns);
-        skip_count_ = draw_basic_axes(ns);
+        skip_count_ = ani_->step();
       }
     }
-
-#if 0
-    void camera_info_callback(const sensor_msgs::msg::CameraInfo::SharedPtr msg)
-    {
-      if (!have_camera_info_) {
-        // Save the info message because we pass it along with the observations.
-        cameraInfo_ = *msg;
-        tf2_util::load_camera_info(*msg, camera_matrix_, dist_coeffs_);
-
-        RCLCPP_INFO(get_logger(), "have camera info");
-        have_camera_info_ = true;
-      }
-    }
-
-    void image_callback(const sensor_msgs::msg::Image::SharedPtr msg)
-    {
-      if (!have_camera_info_) {
-        return;
-      }
-
-      // Convert ROS to OpenCV
-      cv_bridge::CvImagePtr color = cv_bridge::toCvCopy(msg);
-
-      process_image(color, msg->header);
-    }
-
-    void map_callback(const flock_vlam_msgs::msg::Map::SharedPtr msg)
-    {
-      map_.load_from_msg(msg);
-    }
-
-    void process_image(cv_bridge::CvImagePtr color, std_msgs::msg::Header &header_msg)
-    {
-      // Color to gray for detection
-      cv::Mat gray;
-      cv::cvtColor(color->image, gray, cv::COLOR_BGR2GRAY);
-
-      // Detect markers
-      std::vector<int> ids;
-      std::vector<std::vector<cv::Point2f>> corners;
-      cv::aruco::detectMarkers(gray, dictionary_, corners, ids, detectorParameters_);
-
-      RCLCPP_DEBUG(get_logger(), "process_image: Found %d markers", ids.size());
-
-      // Stop if no markers were detected
-      if (ids.size() == 0) {
-        return;
-      }
-
-      // Calculate the pose of this camera in the map frame.
-      Observations observations(ids, corners);
-      auto camera_pose_f_map = localizer_.average_camera_pose_f_map(observations, camera_matrix_, dist_coeffs_);
-
-      if (camera_pose_f_map.is_valid()) {
-        // Publish the camera pose in the map frame
-        auto camera_pose_f_map_msg = camera_pose_f_map.to_pose_with_covariance_stamped_msg(header_msg);
-
-        // for now just publish a pose message not a pose
-        geometry_msgs::msg::PoseWithCovarianceStamped cam_pose_f_map;
-        cam_pose_f_map.pose.pose = camera_pose_f_map_msg.pose.pose;
-        cam_pose_f_map.header = header_msg;
-        cam_pose_f_map.header.frame_id = "map";
-        cam_pose_f_map.pose.covariance[0] = 6e-3;
-        cam_pose_f_map.pose.covariance[7] = 6e-3;
-        cam_pose_f_map.pose.covariance[14] = 6e-3;
-        cam_pose_f_map.pose.covariance[21] = 2e-3;
-        cam_pose_f_map.pose.covariance[28] = 2e-3;
-        cam_pose_f_map.pose.covariance[35] = 2e-3;
-        camera_pose_pub_->publish(cam_pose_f_map);
-      }
-
-      // Publish the observations only if multiple markers exist in the image
-      if (ids.size() > 1) {
-        auto observations_msg = observations.to_msg(header_msg, cameraInfo_);
-        observations_pub_->publish(observations_msg);
-      }
-
-      // Publish an annotated image
-      if (count_subscribers(image_marked_pub_->get_topic_name()) > 0) {
-
-        // Compute marker poses in two ways to verify that the math is working.
-        // Compute marker poses using OpenCV methods. The estimatePoseSingleMarkers() method
-        // returns the pose of the marker in the camera frame - t_camera_marker.
-//        std::vector<cv::Vec3d> rvecs, tvecs;
-//        cv::aruco::estimatePoseSingleMarkers(corners, marker_length_, camera_matrix_, dist_coeffs_, rvecs, tvecs);
-
-        // Compute marker poses using vlam info. Note this can only be done if
-        // a camera pose in map frame is determined and we have a marker pose in
-        // the map frame. The calculation is to take the marker location in the map
-        // frame t_map_marker and transform (pre-multiply) it by t_map_camera.inverse()
-        // to get t_camera_marker.
-        std::vector<cv::Vec3d> rvecs_map, tvecs_map;
-        localizer_.markers_pose_f_camera(camera_pose_f_map, ids, rvecs_map, tvecs_map);
-
-        // Draw poses
-//        for (int i = 0; i < rvecs.size(); i++) {
-//          cv::aruco::drawAxis(color->image, camera_matrix_, dist_coeffs_, rvecs[i], tvecs[i], 0.1);
-//        }
-        for (int i = 0; i < rvecs_map.size(); i++) {
-          cv::aruco::drawAxis(color->image, camera_matrix_, dist_coeffs_, rvecs_map[i], tvecs_map[i], 0.1);
-        }
-
-        // Publish result
-        image_marked_pub_->publish(color->toImageMsg());
-      }
-    };
-#endif
   };
 }
 

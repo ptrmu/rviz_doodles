@@ -26,7 +26,7 @@ private:
   }
 
 public:
-  TransformWithCovariance(const tf2::Transform &transform, cov_type &cov)
+  TransformWithCovariance(const tf2::Transform &transform, const cov_type &cov)
     : is_valid_(true), transform_(transform), cov_(cov)
   {}
 

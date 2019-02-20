@@ -1,5 +1,5 @@
 
-#include "rclcpp/rclcpp.hpp"
+#include "rclcpp/clock.hpp"
 
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/pose_with_covariance_stamped.hpp"
@@ -7,8 +7,11 @@
 #include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/msg/image.hpp"
 #include "std_msgs/msg/header.hpp"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.h"
+#include "tf2_msgs/msg/tf_message.hpp"
 #include "visualization_msgs/msg/marker.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
+
 
 #include "TransformWithCovariance.hpp"
 
@@ -29,12 +32,15 @@ namespace rviz_doodles
 
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;
+    rclcpp::Publisher<tf2_msgs::msg::TFMessage>::SharedPtr tf_message_pub_;
 
-    Context(rclcpp::Node &node)
+
+    explicit Context(rclcpp::Node &node)
       : node_(node)
     {
       marker_pub_ = node_.create_publisher<visualization_msgs::msg::Marker>("marker", 10);
       markers_pub_ = node_.create_publisher<visualization_msgs::msg::MarkerArray>("markers", 10);
+      tf_message_pub_ = node_.create_publisher<tf2_msgs::msg::TFMessage>("/tf", 10);
     }
   };
 
@@ -62,7 +68,7 @@ namespace rviz_doodles
 
   class IEmitter
   {
-    virtual void do_emit(void) = 0;
+    virtual void do_emit() = 0;
 
   protected:
     std::shared_ptr<Context> cxt_;
@@ -78,12 +84,45 @@ namespace rviz_doodles
     }
 
     ~IEmitter()
-    {}
+    {
+      auto stamp = cxt_->node_.now();
+
+      // Delete any markers we have created. The transforms will time out after a while.
+      visualization_msgs::msg::MarkerArray markers;
+
+      // Loop over all the markers, mark them for deletion, and add them to the markers msg.
+      for (auto m : markers_) {
+        m.header.stamp = stamp;
+        m.type = visualization_msgs::msg::Marker::DELETE;
+
+        // Add m to the markers message
+        markers.markers.push_back(m);
+      }
+
+      cxt_->markers_pub_->publish(markers);
+    }
 
   public:
-    void emit(void)
+    void emit()
     {
       do_emit();
+    }
+
+    void add_complete()
+    {
+      // Walk through the markers updating their namespaces with the
+      // transforms name.
+      for (auto &m : markers_) {
+        // Build up a ns for this marker by concatenating frame_ids.
+        std::string my_ns = m.ns;
+        std::string my_frame_id = m.header.frame_id;
+        while (my_frame_id.length()) {
+          my_ns.append(".");
+          my_ns.append(my_frame_id);
+          my_frame_id = transforms_.count(my_frame_id) ? transforms_[my_frame_id]->parent_frame_id_ : "";
+        }
+        m.ns = my_ns;
+      }
     }
 
     void add_transform(const std::string &frame_id, const std::string &parent_frame_id,
@@ -98,17 +137,7 @@ namespace rviz_doodles
       visualization_msgs::msg::Marker m(marker);
 
       m.header.frame_id = frame_id;
-
-      // Build up a ns for this marker by concatenating frame_ids. Note that this requires that
-      // the transforms be added before the markers are added.
-      std::string my_ns = ns;
-      std::string my_frame_id = frame_id;
-      while (my_frame_id.length()) {
-        my_ns.append(".");
-        my_ns.append(my_frame_id);
-        my_frame_id = transforms_.count(my_frame_id) ? transforms_[my_frame_id]->parent_frame_id_ : "";
-      }
-      m.ns = my_ns;
+      m.ns = ns;
 
       markers_.push_back(m);
     }
@@ -117,9 +146,8 @@ namespace rviz_doodles
     {
       visualization_msgs::msg::Marker marker;
 
-      // Set the frame ID and timestamp. The frame_id will be set when this
-      //  marker is added.
-      marker.header.stamp = cxt_->node_.now();
+      // Set the frame ID and timestamp. The frame_id and the stamp will be set when this
+      // marker is added.
 
       // Set the namespace and id for this marker. The ns will be set when this
       // marker is added
@@ -188,8 +216,10 @@ namespace rviz_doodles
 
   class MapFrameEmitter : public IEmitter
   {
-    void do_emit(void)
+    void do_emit()
     {
+      auto stamp = cxt_->node_.now();
+
       visualization_msgs::msg::MarkerArray markers;
 
       // Loop over all the markers, adjust their transformation, and add them to the markers msg.
@@ -232,6 +262,8 @@ namespace rviz_doodles
           m.header.frame_id = holder->parent_frame_id_;
         }
 
+        m.header.stamp = stamp;
+
         // Add m to the markers message
         markers.markers.push_back(m);
       }
@@ -244,7 +276,61 @@ namespace rviz_doodles
     MapFrameEmitter(std::shared_ptr<Context> &cxt, const std::string &ns)
       : IEmitter(cxt, ns)
     {}
+  };
 
+
+//=============
+// Tf2Emitter
+//=============
+
+  class Tf2Emitter : public IEmitter
+  {
+    void do_emit()
+    {
+      auto stamp = cxt_->node_.now();
+
+      // First publish transforms
+      tf2_msgs::msg::TFMessage tf_message;
+
+      // Walk through each TransformHolder and create a
+      // TransformStamped message and add it to the tf_message.
+      for (auto const &t_pair : transforms_) {
+        auto &th = *t_pair.second;
+        auto mu = th.t_parent_self_;
+
+        tf2::Quaternion q;
+        q.setRPY(mu[3], mu[4], mu[5]);
+        auto tf2_transform = tf2::Transform(q, tf2::Vector3(mu[0], mu[1], mu[2]));
+
+        geometry_msgs::msg::TransformStamped msg;
+        msg.header.stamp = stamp;
+        msg.header.frame_id = th.parent_frame_id_;
+        msg.child_frame_id = th.frame_id_;
+        msg.transform = tf2::toMsg(tf2_transform);
+
+        tf_message.transforms.push_back(msg);
+      }
+
+      cxt_->tf_message_pub_->publish(tf_message);
+
+      // Then publish markers
+      visualization_msgs::msg::MarkerArray markers;
+
+      // Loop over all the markers, and add them to the markers msg.
+      for (auto m : markers_) {
+        m.header.stamp = stamp;
+
+        // Add m to the markers message
+        markers.markers.push_back(m);
+      }
+
+      cxt_->markers_pub_->publish(markers);
+    }
+
+  public:
+    Tf2Emitter(std::shared_ptr<Context> &cxt, const std::string &ns)
+      : IEmitter(cxt, ns)
+    {}
   };
 
 //=============
@@ -264,7 +350,7 @@ namespace rviz_doodles
       emt_ = emt;
     }
 
-    int step(void)
+    int step()
     {
       return do_step();
     }
@@ -287,13 +373,14 @@ namespace rviz_doodles
       : IAnimation(cxt, emt)
     {
       emt_->add_transform("basic", "map",
-                          TransformWithCovariance::mu_type{0.5, 0.5, 0.1, 0., 0., TF2SIMD_PI / 8});
+                          TransformWithCovariance::mu_type{1., 1., 0.5, 0., 0., TF2SIMD_PI / 8});
       emt_->add_axes("map", "axes");
       emt_->add_axes("basic", "axes");
+      emt_->add_complete();
     }
 
   private:
-    virtual int do_step(void)
+    virtual int do_step()
     {
       emt_->emit();
       return draw_axes_skip_count_;
@@ -306,10 +393,10 @@ namespace rviz_doodles
 
   class RvizDoodlesNode : public rclcpp::Node
   {
-    const int timer_inverval_milliseconds_ = 100;
+    const int timer_interval_milliseconds_ = 100;
 
     const int draw_basic_marker_interval_milliseconds_ = 2000;
-    const int draw_basic_marker_skip_count_ = draw_basic_marker_interval_milliseconds_ / timer_inverval_milliseconds_;
+    const int draw_basic_marker_skip_count_ = draw_basic_marker_interval_milliseconds_ / timer_interval_milliseconds_;
 
     uint32_t basic_marker_shape_;
     rclcpp::TimerBase::SharedPtr timer_sub_;
@@ -327,14 +414,16 @@ namespace rviz_doodles
       basic_marker_shape_ = visualization_msgs::msg::Marker::CUBE;
 
       auto timer_pub_cb = std::bind(&RvizDoodlesNode::timer_callback, this);
-      timer_sub_ = create_wall_timer(std::chrono::milliseconds(timer_inverval_milliseconds_), timer_pub_cb);
+      timer_sub_ = create_wall_timer(std::chrono::milliseconds(timer_interval_milliseconds_), timer_pub_cb);
+
+      cxt_ = std::make_shared<Context>(*this);
 
       RCLCPP_INFO(get_logger(), "rviz_doodles_node ready");
     }
 
   private:
 
-    int draw_basic_marker(const std::string ns)
+    int draw_basic_marker(const std::string &ns)
     {
       visualization_msgs::msg::Marker marker;
 
@@ -389,6 +478,7 @@ namespace rviz_doodles
         case visualization_msgs::msg::Marker::ARROW:
           basic_marker_shape_ = visualization_msgs::msg::Marker::CYLINDER;
           break;
+        default:
         case visualization_msgs::msg::Marker::CYLINDER:
           basic_marker_shape_ = visualization_msgs::msg::Marker::CUBE;
           break;
@@ -397,13 +487,11 @@ namespace rviz_doodles
       return draw_basic_marker_skip_count_;
     }
 
-    void timer_callback(void)
+    void timer_callback()
     {
-      if (!cxt_) {
-        cxt_ = std::make_shared<Context>(*this);
-      }
       if (!emt_) {
-        emt_ = std::make_shared<MapFrameEmitter>(cxt_, "rviz_doodle");
+//        emt_ = std::make_shared<MapFrameEmitter>(cxt_, "rviz_doodle");
+        emt_ = std::make_shared<Tf2Emitter>(cxt_, "rviz_doodle");
       }
       if (!ani_) {
         ani_ = std::make_shared<BasicAxes>(cxt_, emt_);
@@ -422,7 +510,7 @@ namespace rviz_doodles
 int main(int argc, char **argv)
 {
   // Force flush of the stdout buffer
-  setvbuf(stdout, NULL, _IONBF, BUFSIZ);
+  setvbuf(stdout, nullptr, _IONBF, BUFSIZ);
 
   // Init ROS
   rclcpp::init(argc, argv);
@@ -433,6 +521,9 @@ int main(int argc, char **argv)
 
   // Spin until rclcpp::ok() returns false
   rclcpp::spin(node);
+
+  // Shut down the Node
+  node.reset();
 
   // Shut down ROS
   rclcpp::shutdown();

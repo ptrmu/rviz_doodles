@@ -28,6 +28,7 @@ find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(tf2_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
 # Local includes
@@ -36,6 +37,7 @@ include_directories(
   ${geometry_msgs_INCLUDE_DIRS}
   ${sensor_msgs_INCLUDE_DIRS}
   ${std_msgs_INCLUDE_DIRS}
+  ${tf2_msgs_INCLUDE_DIRS}
   ${visualization_msgs_INCLUDE_DIRS}
 )
 
@@ -62,6 +64,7 @@ ament_target_dependencies(${PROJECT_NAME}
   rclcpp
   sensor_msgs
   std_msgs
+  tf2_msgs
   visualization_msgs
   )
 

@@ -28,7 +28,7 @@ namespace rviz_doodles
   {
     rclcpp::Node &node_;
 
-    const static int timer_inverval_milliseconds_ = 100;
+    const static int timer_interval_milliseconds_ = 100;
 
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;
@@ -106,6 +106,11 @@ namespace rviz_doodles
     void emit()
     {
       do_emit();
+    }
+
+    visualization_msgs::msg::Marker &get_marker(int idx)
+    {
+      return markers_[idx];
     }
 
     void add_complete()
@@ -365,8 +370,8 @@ namespace rviz_doodles
 
   class BasicAxes : public IAnimation
   {
-    const int draw_axes_interval_milliseconds_ = 500;
-    const int draw_axes_skip_count_ = draw_axes_interval_milliseconds_ / Context::timer_inverval_milliseconds_;
+    const int basic_axes_interval_milliseconds_ = 500;
+    const int basic_axes_skip_count_ = basic_axes_interval_milliseconds_ / Context::timer_interval_milliseconds_;
 
   public:
     BasicAxes(std::shared_ptr<Context> &cxt, std::shared_ptr<IEmitter> &emt)
@@ -383,63 +388,28 @@ namespace rviz_doodles
     virtual int do_step()
     {
       emt_->emit();
-      return draw_axes_skip_count_;
+      return basic_axes_skip_count_;
     }
   };
 
 //=============
-// RvizDoodlesNode class
+// BasicMarkers class
 //=============
 
-  class RvizDoodlesNode : public rclcpp::Node
+  class BasicMarkers : public IAnimation
   {
-    const int timer_interval_milliseconds_ = 100;
-
-    const int draw_basic_marker_interval_milliseconds_ = 2000;
-    const int draw_basic_marker_skip_count_ = draw_basic_marker_interval_milliseconds_ / timer_interval_milliseconds_;
-
-    uint32_t basic_marker_shape_;
-    rclcpp::TimerBase::SharedPtr timer_sub_;
-    int skip_count_ = 0;
-
-    std::shared_ptr<Context> cxt_;
-    std::shared_ptr<IEmitter> emt_;
-    std::shared_ptr<IAnimation> ani_;
+    const int basic_markers_interval_milliseconds_ = 2000;
+    const int basic_markers_skip_count_ = basic_markers_interval_milliseconds_ / Context::timer_interval_milliseconds_;
 
   public:
-
-    explicit RvizDoodlesNode()
-      : Node("rviz_doodles_node")
+    BasicMarkers(std::shared_ptr<Context> &cxt, std::shared_ptr<IEmitter> &emt)
+      : IAnimation(cxt, emt)
     {
-      basic_marker_shape_ = visualization_msgs::msg::Marker::CUBE;
-
-      auto timer_pub_cb = std::bind(&RvizDoodlesNode::timer_callback, this);
-      timer_sub_ = create_wall_timer(std::chrono::milliseconds(timer_interval_milliseconds_), timer_pub_cb);
-
-      cxt_ = std::make_shared<Context>(*this);
-
-      RCLCPP_INFO(get_logger(), "rviz_doodles_node ready");
-    }
-
-  private:
-
-    int draw_basic_marker(const std::string &ns)
-    {
+      // Add a marker. Do this first so it gets index 0.
       visualization_msgs::msg::Marker marker;
 
-      // Set the frame ID and timestamp.  See the TF tutorials for information on these.
-      marker.header.frame_id = "map";
-      marker.header.stamp = this->now();
-
-      // Set the namespace and id for this marker.  This serves to create a unique ID
-      // Any marker sent with the same namespace and id will overwrite the old one
-      marker.ns = ns + ".basic_shapes";
       marker.id = 0;
-
-      // Set the marker type.  Initially this is CUBE, and cycles between that and SPHERE, ARROW, and CYLINDER
-      marker.type = basic_marker_shape_;
-
-      // Set the marker action.  Options are ADD and DELETE
+      marker.type = visualization_msgs::msg::Marker::CUBE;
       marker.action = visualization_msgs::msg::Marker::ADD;
 
       // Set the pose of the marker.  This is a full 6DOF pose relative to the frame/time specified in the header
@@ -462,31 +432,73 @@ namespace rviz_doodles
       marker.color.b = 0.0f;
       marker.color.a = 1.0;
 
-//      marker.lifetime = 1000;
+      // Add the marker to the emit list
+      emt_->add_marker("basic", "basic_marker", marker);
 
-      // Publish the marker
-      cxt_->marker_pub_->publish(marker);
+      // Add a transform and axes
+      emt_->add_transform("basic", "map",
+                          TransformWithCovariance::mu_type{1., 1., 0.5, 0., 0., TF2SIMD_PI / 8});
+      emt_->add_axes("map", "axes");
+
+      emt_->add_complete();
+    }
+
+  private:
+    virtual int do_step()
+    {
+      emt_->emit();
 
       // Cycle between different shapes
-      switch (basic_marker_shape_) {
+      auto &m = emt_->get_marker(0);
+      switch (m.type) {
         case visualization_msgs::msg::Marker::CUBE:
-          basic_marker_shape_ = visualization_msgs::msg::Marker::SPHERE;
+          m.type = visualization_msgs::msg::Marker::SPHERE;
           break;
         case visualization_msgs::msg::Marker::SPHERE:
-          basic_marker_shape_ = visualization_msgs::msg::Marker::ARROW;
+          m.type = visualization_msgs::msg::Marker::ARROW;
           break;
         case visualization_msgs::msg::Marker::ARROW:
-          basic_marker_shape_ = visualization_msgs::msg::Marker::CYLINDER;
+          m.type = visualization_msgs::msg::Marker::CYLINDER;
           break;
         default:
         case visualization_msgs::msg::Marker::CYLINDER:
-          basic_marker_shape_ = visualization_msgs::msg::Marker::CUBE;
+          m.type = visualization_msgs::msg::Marker::CUBE;
           break;
       }
 
-      return draw_basic_marker_skip_count_;
+      return basic_markers_skip_count_;
+    }
+  };
+
+//=============
+// RvizDoodlesNode class
+//=============
+
+  class RvizDoodlesNode : public rclcpp::Node
+  {
+    const int timer_interval_milliseconds_ = 100;
+
+    rclcpp::TimerBase::SharedPtr timer_sub_;
+    int skip_count_ = 0;
+
+    std::shared_ptr<Context> cxt_;
+    std::shared_ptr<IEmitter> emt_;
+    std::shared_ptr<IAnimation> ani_;
+
+  public:
+
+    explicit RvizDoodlesNode()
+      : Node("rviz_doodles_node")
+    {
+      auto timer_pub_cb = std::bind(&RvizDoodlesNode::timer_callback, this);
+      timer_sub_ = create_wall_timer(std::chrono::milliseconds(timer_interval_milliseconds_), timer_pub_cb);
+
+      cxt_ = std::make_shared<Context>(*this);
+
+      RCLCPP_INFO(get_logger(), "rviz_doodles_node ready");
     }
 
+  private:
     void timer_callback()
     {
       if (!emt_) {
@@ -494,7 +506,8 @@ namespace rviz_doodles
         emt_ = std::make_shared<Tf2Emitter>(cxt_, "rviz_doodle");
       }
       if (!ani_) {
-        ani_ = std::make_shared<BasicAxes>(cxt_, emt_);
+//        ani_ = std::make_shared<BasicAxes>(cxt_, emt_);
+        ani_ = std::make_shared<BasicMarkers>(cxt_, emt_);
       }
       if (skip_count_-- <= 0) {
         skip_count_ = ani_->step();

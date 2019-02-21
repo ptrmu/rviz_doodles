@@ -28,7 +28,7 @@ namespace rviz_doodles
   {
     rclcpp::Node &node_;
 
-    const static int timer_interval_milliseconds_ = 100;
+    constexpr static int timer_interval_milliseconds_ = 100;
 
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;
@@ -55,7 +55,7 @@ namespace rviz_doodles
     TransformWithCovariance::mu_type t_parent_self_;
 
     TransformHolder(const std::string &frame_id, const std::string &parent_frame_id,
-                    TransformWithCovariance::mu_type &t_parent_self)
+                    const TransformWithCovariance::mu_type &t_parent_self)
       : frame_id_(frame_id), parent_frame_id_(parent_frame_id),
         t_parent_self_(t_parent_self)
     {
@@ -74,7 +74,7 @@ namespace rviz_doodles
     std::shared_ptr<Context> cxt_;
     const std::string ns_;
 
-    std::map<std::string, std::shared_ptr<TransformHolder>> transforms_;
+    std::map<std::string, TransformHolder> transforms_;
     std::vector<visualization_msgs::msg::Marker> markers_;
 
     IEmitter(std::shared_ptr<Context> &cxt, const std::string &ns)
@@ -108,9 +108,26 @@ namespace rviz_doodles
       do_emit();
     }
 
-    visualization_msgs::msg::Marker &get_marker(int idx)
+    void reset()
     {
-      return markers_[idx];
+
+    }
+
+    visualization_msgs::msg::Marker *get_marker(int idx)
+    {
+      if (idx >= markers_.size()) {
+        return nullptr;
+      }
+      return &markers_[idx];
+    }
+
+    TransformHolder *get_transform_holder(const std::string &frame_id)
+    {
+      auto p = transforms_.find(frame_id);
+      if (p == transforms_.end()) {
+        return nullptr;
+      }
+      return &p->second;
     }
 
     void add_complete()
@@ -124,17 +141,17 @@ namespace rviz_doodles
         while (my_frame_id.length()) {
           my_ns.append(".");
           my_ns.append(my_frame_id);
-          my_frame_id = transforms_.count(my_frame_id) ? transforms_[my_frame_id]->parent_frame_id_ : "";
+          auto pp = transforms_.find(my_frame_id);
+          my_frame_id = pp != transforms_.end() ? pp->second.parent_frame_id_ : "";
         }
         m.ns = my_ns;
       }
     }
 
     void add_transform(const std::string &frame_id, const std::string &parent_frame_id,
-                       TransformWithCovariance::mu_type t_parent_self)
+                       const TransformWithCovariance::mu_type &t_parent_self)
     {
-      auto th = std::make_shared<TransformHolder>(frame_id, parent_frame_id, t_parent_self);
-      transforms_[frame_id] = th;
+      transforms_.emplace(frame_id, TransformHolder(frame_id, parent_frame_id, t_parent_self));
     }
 
     void add_marker(const std::string &frame_id, const std::string &ns, const visualization_msgs::msg::Marker &marker)
@@ -232,16 +249,19 @@ namespace rviz_doodles
         // m is a copy of the item in the vector so we can modify it.
         // If the frame_id of this marker is a valid transformation, then transform the
         // marker
-        if (transforms_.count(m.header.frame_id)) {
-          auto holder = transforms_[m.header.frame_id];
-          TransformWithCovariance t(holder->t_parent_self_, TransformWithCovariance::cov_type());
+        auto pp = transforms_.find(m.header.frame_id);
+        if (pp != transforms_.end()) {
+          auto &holder = pp->second;
+          TransformWithCovariance t(holder.t_parent_self_, TransformWithCovariance::cov_type());
 
           // Walk up the transform chain if there are more transforms
-          while (transforms_.count(holder->parent_frame_id_)) {
-            holder = transforms_[holder->parent_frame_id_];
-            TransformWithCovariance t1(holder->t_parent_self_, TransformWithCovariance::cov_type());
+          pp = transforms_.find(holder.parent_frame_id_);
+          while (pp != transforms_.end()) {
+            auto &th = pp->second;
+            TransformWithCovariance t1(th.t_parent_self_, TransformWithCovariance::cov_type());
             auto tf2_transform = t1.transform() * t.transform();
             t = TransformWithCovariance(tf2_transform, TransformWithCovariance::cov_type());
+            pp = transforms_.find(th.parent_frame_id_);
           }
 
           // Do the transformation
@@ -264,7 +284,7 @@ namespace rviz_doodles
           m.pose.orientation.w = qm1.w();
 
           // Set the frame_id of this marker to be the parent of the last transformation
-          m.header.frame_id = holder->parent_frame_id_;
+          m.header.frame_id = holder.parent_frame_id_;
         }
 
         m.header.stamp = stamp;
@@ -300,7 +320,7 @@ namespace rviz_doodles
       // Walk through each TransformHolder and create a
       // TransformStamped message and add it to the tf_message.
       for (auto const &t_pair : transforms_) {
-        auto &th = *t_pair.second;
+        auto &th = t_pair.second;
         auto mu = th.t_parent_self_;
 
         tf2::Quaternion q;
@@ -339,29 +359,105 @@ namespace rviz_doodles
   };
 
 //=============
+// AnimationDelta, AnimationPhase structs
+//=============
+
+  struct AnimationDelta
+  {
+    std::string frame_id_;
+    TransformWithCovariance::mu_type mu_delta_;
+
+    AnimationDelta(const std::string &frame_id, const TransformWithCovariance::mu_type &mu_delta)
+      : frame_id_(frame_id), mu_delta_(mu_delta)
+    {}
+  };
+
+  struct AnimationPhase
+  {
+    int step_count_;
+    std::vector<AnimationDelta> deltas_;
+
+    AnimationPhase(int step_count)
+      : step_count_(step_count)
+    {}
+
+    void add_delta(const std::string &frame_id, const TransformWithCovariance::mu_type &mu_delta)
+    {
+      deltas_.emplace(deltas_.end(), AnimationDelta(frame_id, mu_delta));
+    }
+  };
+
+//=============
 // Animation interface
 //=============
 
   class IAnimation
   {
+    std::vector<AnimationPhase> phases_;
+    int current_phase_ = -1;
+    int current_step_ = 0;
+    int skip_count_;
+
+    // method to override for custom behavior at each step.
+    virtual void do_step()
+    {}
+
   protected:
     std::shared_ptr<Context> cxt_;
     std::shared_ptr<IEmitter> emt_;
 
   public:
-    IAnimation(std::shared_ptr<Context> &cxt, std::shared_ptr<IEmitter> &emt)
+    IAnimation(std::shared_ptr<Context> &cxt, std::shared_ptr<IEmitter> &emt, int skip_count)
+      : skip_count_(skip_count)
     {
       cxt_ = cxt;
       emt_ = emt;
     }
 
-    int step()
+    void add_phase(const AnimationPhase &phase)
     {
-      return do_step();
+      phases_.emplace(phases_.end(), phase);
     }
 
-  private:
-    virtual int do_step(void) = 0;
+    int step()
+    {
+      if (current_phase_ == -1) {
+        emt_->reset();
+        current_phase_ = 0;
+        current_step_ = 0;
+      }
+
+      emt_->emit();
+
+      if (current_phase_ >= phases_.size()) {
+        current_phase_ = -1;
+      } else {
+
+        // The current phase
+        auto &phase = phases_[current_phase_];
+        current_step_ += 1;
+
+        // Update the transforms specified in this phase.
+        for (auto &d : phase.deltas_) {
+          auto pp = emt_->get_transform_holder(d.frame_id_);
+          if (pp) {
+            for (int i = 0; i < d.mu_delta_.size(); i += 1) {
+              pp->t_parent_self_[i] += d.mu_delta_[i];
+            }
+          }
+        }
+
+        // Test for the end of this phase
+        if (current_step_ >= phase.step_count_) {
+          current_phase_ += 1;
+          current_step_ = 0;
+        }
+      }
+
+      do_step();
+
+      return skip_count_;
+    }
   };
 
 //=============
@@ -370,25 +466,18 @@ namespace rviz_doodles
 
   class BasicAxes : public IAnimation
   {
-    const int basic_axes_interval_milliseconds_ = 500;
-    const int basic_axes_skip_count_ = basic_axes_interval_milliseconds_ / Context::timer_interval_milliseconds_;
+    constexpr static int basic_axes_interval_milliseconds_ = 500;
+    constexpr static int basic_axes_skip_count_ = basic_axes_interval_milliseconds_ / Context::timer_interval_milliseconds_;
 
   public:
     BasicAxes(std::shared_ptr<Context> &cxt, std::shared_ptr<IEmitter> &emt)
-      : IAnimation(cxt, emt)
+      : IAnimation(cxt, emt, basic_axes_skip_count_)
     {
       emt_->add_transform("basic", "map",
                           TransformWithCovariance::mu_type{1., 1., 0.5, 0., 0., TF2SIMD_PI / 8});
       emt_->add_axes("map", "axes");
       emt_->add_axes("basic", "axes");
       emt_->add_complete();
-    }
-
-  private:
-    virtual int do_step()
-    {
-      emt_->emit();
-      return basic_axes_skip_count_;
     }
   };
 
@@ -398,12 +487,12 @@ namespace rviz_doodles
 
   class BasicMarkers : public IAnimation
   {
-    const int basic_markers_interval_milliseconds_ = 2000;
-    const int basic_markers_skip_count_ = basic_markers_interval_milliseconds_ / Context::timer_interval_milliseconds_;
+    constexpr static int basic_markers_interval_milliseconds_ = 2000;
+    constexpr static int basic_markers_skip_count_ = basic_markers_interval_milliseconds_ / Context::timer_interval_milliseconds_;
 
   public:
     BasicMarkers(std::shared_ptr<Context> &cxt, std::shared_ptr<IEmitter> &emt)
-      : IAnimation(cxt, emt)
+      : IAnimation(cxt, emt, basic_markers_skip_count_)
     {
       // Add a marker. Do this first so it gets index 0.
       visualization_msgs::msg::Marker marker;
@@ -444,29 +533,54 @@ namespace rviz_doodles
     }
 
   private:
-    virtual int do_step()
+    virtual void do_step()
     {
-      emt_->emit();
-
       // Cycle between different shapes
-      auto &m = emt_->get_marker(0);
-      switch (m.type) {
+      auto m = emt_->get_marker(0);
+      switch (m->type) {
         case visualization_msgs::msg::Marker::CUBE:
-          m.type = visualization_msgs::msg::Marker::SPHERE;
+          m->type = visualization_msgs::msg::Marker::SPHERE;
           break;
         case visualization_msgs::msg::Marker::SPHERE:
-          m.type = visualization_msgs::msg::Marker::ARROW;
+          m->type = visualization_msgs::msg::Marker::ARROW;
           break;
         case visualization_msgs::msg::Marker::ARROW:
-          m.type = visualization_msgs::msg::Marker::CYLINDER;
+          m->type = visualization_msgs::msg::Marker::CYLINDER;
           break;
         default:
         case visualization_msgs::msg::Marker::CYLINDER:
-          m.type = visualization_msgs::msg::Marker::CUBE;
+          m->type = visualization_msgs::msg::Marker::CUBE;
           break;
       }
+    }
+  };
 
-      return basic_markers_skip_count_;
+//=============
+// RotatingAxes class
+//=============
+
+  class RotatingAxes : public IAnimation
+  {
+    constexpr static int full_rotation_duration_milliseconds_ = 4000;
+    constexpr static double radians_per_millisecond_ = TF2SIMD_2_PI / full_rotation_duration_milliseconds_;
+    constexpr static double radians_per_callback_ = radians_per_millisecond_ * Context::timer_interval_milliseconds_;
+    constexpr static int one_meter_travel_duration_milliseconds_ = 2000;
+    constexpr static double meters_per_millisecond_ = 1.0 / one_meter_travel_duration_milliseconds_;
+    constexpr static double meters_per_callback = meters_per_millisecond_ * Context::timer_interval_milliseconds_;
+
+  public:
+    RotatingAxes(std::shared_ptr<Context> &cxt, std::shared_ptr<IEmitter> &emt)
+      : IAnimation(cxt, emt, 0)
+    {
+      emt_->add_transform("basic", "map",
+                          TransformWithCovariance::mu_type{1., 1., 0.5, 0., 0., TF2SIMD_PI / 8});
+      emt_->add_axes("map", "axes");
+      emt_->add_axes("basic", "axes");
+      emt_->add_complete();
+
+      AnimationPhase ap(100);
+      ap.add_delta("basic", TransformWithCovariance::mu_type { 0., 0., 0., radians_per_callback_, 0., 0.});
+      add_phase(ap);
     }
   };
 
@@ -502,12 +616,13 @@ namespace rviz_doodles
     void timer_callback()
     {
       if (!emt_) {
-//        emt_ = std::make_shared<MapFrameEmitter>(cxt_, "rviz_doodle");
-        emt_ = std::make_shared<Tf2Emitter>(cxt_, "rviz_doodle");
+        emt_ = std::make_shared<MapFrameEmitter>(cxt_, "rviz_doodle");
+//        emt_ = std::make_shared<Tf2Emitter>(cxt_, "rviz_doodle");
       }
       if (!ani_) {
 //        ani_ = std::make_shared<BasicAxes>(cxt_, emt_);
-        ani_ = std::make_shared<BasicMarkers>(cxt_, emt_);
+//        ani_ = std::make_shared<BasicMarkers>(cxt_, emt_);
+        ani_ = std::make_shared<RotatingAxes>(cxt_, emt_);
       }
       if (skip_count_-- <= 0) {
         skip_count_ = ani_->step();

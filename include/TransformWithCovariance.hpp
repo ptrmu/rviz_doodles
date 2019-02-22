@@ -30,8 +30,16 @@ public:
     : is_valid_(true), transform_(transform), cov_(cov)
   {}
 
+  TransformWithCovariance(const tf2::Transform &transform)
+    : is_valid_(true), transform_(transform)
+  {}
+
   TransformWithCovariance(const mu_type &mu, const cov_type &cov)
     : is_valid_(true), transform_(transformFromMu(mu)), cov_(cov)
+  {}
+
+  TransformWithCovariance(const mu_type &mu)
+    : is_valid_(true), transform_(transformFromMu(mu))
   {}
 
   TransformWithCovariance(const tf2::Quaternion &q)

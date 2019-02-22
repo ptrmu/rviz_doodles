@@ -15,7 +15,7 @@
 
 #include "TransformWithCovariance.hpp"
 
-#include <map>
+#include <unordered_map>
 
 namespace rviz_doodles
 {
@@ -28,20 +28,16 @@ namespace rviz_doodles
   {
     rclcpp::Node &node_;
 
-    constexpr static int timer_interval_milliseconds_ = 100;
+    const static int timer_interval_milliseconds_ = 100;
 
-    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_pub_;
-    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_;
-    rclcpp::Publisher<tf2_msgs::msg::TFMessage>::SharedPtr tf_message_pub_;
-
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr markers_pub_ =
+      node_.create_publisher<visualization_msgs::msg::MarkerArray>("markers", 10);
+    rclcpp::Publisher<tf2_msgs::msg::TFMessage>::SharedPtr tf_message_pub_ =
+      node_.create_publisher<tf2_msgs::msg::TFMessage>("/tf", 10);
 
     explicit Context(rclcpp::Node &node)
       : node_(node)
-    {
-      marker_pub_ = node_.create_publisher<visualization_msgs::msg::Marker>("marker", 10);
-      markers_pub_ = node_.create_publisher<visualization_msgs::msg::MarkerArray>("markers", 10);
-      tf_message_pub_ = node_.create_publisher<tf2_msgs::msg::TFMessage>("/tf", 10);
-    }
+    {}
   };
 
 //=============
@@ -54,12 +50,11 @@ namespace rviz_doodles
     const std::string parent_frame_id_;
     TransformWithCovariance::mu_type t_parent_self_;
 
-    TransformHolder(const std::string &frame_id, const std::string &parent_frame_id,
+    TransformHolder(std::string frame_id, std::string parent_frame_id,
                     const TransformWithCovariance::mu_type &t_parent_self)
-      : frame_id_(frame_id), parent_frame_id_(parent_frame_id),
+      : frame_id_(std::move(frame_id)), parent_frame_id_(std::move(parent_frame_id)),
         t_parent_self_(t_parent_self)
-    {
-    }
+    {}
   };
 
 //=============
@@ -68,24 +63,22 @@ namespace rviz_doodles
 
   class IEmitter
   {
+    // function overridden by the derived classes.
     virtual void do_emit() = 0;
 
   protected:
     std::shared_ptr<Context> cxt_;
-    const std::string ns_;
 
-    std::map<std::string, TransformHolder> transforms_;
+    std::unordered_map<std::string, TransformHolder> transforms_;
     std::vector<visualization_msgs::msg::Marker> markers_;
-    std::map<std::string, TransformHolder> temp_transforms_;
+    std::unordered_map<std::string, TransformHolder> temp_transforms_;
     std::vector<visualization_msgs::msg::Marker> temp_markers_;
 
     bool ns_updated_ = false;
 
-    IEmitter(std::shared_ptr<Context> &cxt, const std::string &ns)
-      : ns_(ns)
-    {
-      cxt_ = cxt;
-    }
+    IEmitter(std::shared_ptr<Context> cxt)
+      : cxt_(std::move(cxt))
+    {}
 
     ~IEmitter()
     {
@@ -95,28 +88,33 @@ namespace rviz_doodles
       visualization_msgs::msg::MarkerArray markers;
 
       // Loop over all the markers, mark them for deletion, and add them to the markers msg.
-      for (auto m : markers_) {
+      // Can use &m as a reference and modify the original marker because it will never be
+      // used again.
+      for (auto &m : markers_) {
         m.header.stamp = stamp;
         m.type = visualization_msgs::msg::Marker::DELETE;
 
         // Add m to the markers message
-        markers.markers.push_back(m);
+        markers.markers.emplace_back(m);
       }
 
       cxt_->markers_pub_->publish(markers);
     }
 
   public:
+    // The public non-virtual API function that delegates to private overridden virtual functions.
     void emit()
     {
       do_emit();
     }
 
+    // Move transforms and markers to the temp_xxx containers where they will
+    // be modified during execution of the animation.
     void reset()
     {
       if (!ns_updated_) {
-        // Walk through the markers updating their namespaces with the
-        // transforms name.
+        // Walk through the markers updating their namespaces with their
+        // transform's name.
         for (auto &m : markers_) {
           // Build up a ns for this marker by concatenating frame_ids.
           std::string _ns = m.ns;
@@ -143,7 +141,7 @@ namespace rviz_doodles
 
       // Move the markers to the working list.
       for (auto &m : markers_) {
-        temp_markers_.emplace(temp_markers_.end(), m);
+        temp_markers_.emplace_back(m);
       }
     }
 
@@ -170,14 +168,11 @@ namespace rviz_doodles
       transforms_.emplace(frame_id, TransformHolder(frame_id, parent_frame_id, t_parent_self));
     }
 
-    void add_marker(const std::string &frame_id, const std::string &ns, const visualization_msgs::msg::Marker &marker)
+    void add_marker(std::string frame_id, std::string ns, visualization_msgs::msg::Marker marker)
     {
-      visualization_msgs::msg::Marker m(marker);
-
-      m.header.frame_id = frame_id;
-      m.ns = ns;
-
-      markers_.push_back(m);
+      marker.header.frame_id = std::move(frame_id);
+      marker.ns = std::move(ns);
+      markers_.emplace_back(std::move(marker));
     }
 
     void add_axes(const std::string &frame_id, const std::string &ns)
@@ -254,7 +249,7 @@ namespace rviz_doodles
 
   class MapFrameEmitter : public IEmitter
   {
-    void do_emit()
+    void do_emit() override
     {
       auto stamp = cxt_->node_.now();
 
@@ -270,16 +265,16 @@ namespace rviz_doodles
         if (pp != temp_transforms_.end()) {
           auto &holder = pp->second;
           frame_id = holder.parent_frame_id_;
-          TransformWithCovariance t(holder.t_parent_self_, TransformWithCovariance::cov_type());
+          TransformWithCovariance t(holder.t_parent_self_);
 
           // Walk up the transform chain if there are more transforms
           pp = temp_transforms_.find(holder.parent_frame_id_);
           while (pp != temp_transforms_.end()) {
             auto &th = pp->second;
             frame_id = th.parent_frame_id_;
-            TransformWithCovariance t1(th.t_parent_self_, TransformWithCovariance::cov_type());
+            TransformWithCovariance t1(th.t_parent_self_);
             auto tf2_transform = t1.transform() * t.transform();
-            t = TransformWithCovariance(tf2_transform, TransformWithCovariance::cov_type());
+            t = TransformWithCovariance(tf2_transform);
             pp = temp_transforms_.find(th.parent_frame_id_);
           }
 
@@ -309,7 +304,7 @@ namespace rviz_doodles
         m.header.stamp = stamp;
 
         // Add m to the markers message
-        markers.markers.push_back(m);
+        markers.markers.emplace_back(m);
       }
 
       // And publish these markers
@@ -317,8 +312,8 @@ namespace rviz_doodles
     }
 
   public:
-    MapFrameEmitter(std::shared_ptr<Context> &cxt, const std::string &ns)
-      : IEmitter(cxt, ns)
+    MapFrameEmitter(std::shared_ptr<Context> &cxt)
+      : IEmitter(cxt)
     {}
   };
 
@@ -329,7 +324,7 @@ namespace rviz_doodles
 
   class Tf2Emitter : public IEmitter
   {
-    void do_emit()
+    void do_emit() override
     {
       auto stamp = cxt_->node_.now();
 
@@ -352,7 +347,7 @@ namespace rviz_doodles
         msg.child_frame_id = th.frame_id_;
         msg.transform = tf2::toMsg(tf2_transform);
 
-        tf_message.transforms.push_back(msg);
+        tf_message.transforms.emplace_back(msg);
       }
 
       cxt_->tf_message_pub_->publish(tf_message);
@@ -365,15 +360,15 @@ namespace rviz_doodles
         m.header.stamp = stamp;
 
         // Add m to the markers message
-        markers.markers.push_back(m);
+        markers.markers.emplace_back(m);
       }
 
       cxt_->markers_pub_->publish(markers);
     }
 
   public:
-    Tf2Emitter(std::shared_ptr<Context> &cxt, const std::string &ns)
-      : IEmitter(cxt, ns)
+    Tf2Emitter(std::shared_ptr<Context> &cxt)
+      : IEmitter(cxt)
     {}
   };
 
@@ -383,15 +378,11 @@ namespace rviz_doodles
 
   struct AnimationPlan
   {
-    std::string frame_id_;
+    const std::string frame_id_;
     TransformWithCovariance::mu_type mu_delta_;
 
-    AnimationPlan(const std::string &frame_id, const TransformWithCovariance::mu_type &mu_delta)
-      : frame_id_(frame_id), mu_delta_(mu_delta)
-    {}
-
-    AnimationPlan(int step_count, const std::string &frame_id, const TransformWithCovariance::mu_type &mu_final)
-      : frame_id_(frame_id)
+    AnimationPlan(int step_count, std::string frame_id, const TransformWithCovariance::mu_type &mu_final)
+      : frame_id_(std::move(frame_id))
     {
       for (int i = 0; i < mu_final.size(); i += 1) {
         mu_delta_[i] = mu_final[i] / step_count;
@@ -420,7 +411,7 @@ namespace rviz_doodles
     int current_step_ = 0;
     int skip_count_;
 
-    // method to override for custom behavior at each step.
+    // Method to override for custom behavior at each step.
     virtual void do_step()
     {}
 
@@ -432,20 +423,17 @@ namespace rviz_doodles
     using mu_type = TransformWithCovariance::mu_type;
 
     IAnimation(std::shared_ptr<Context> &cxt, std::shared_ptr<IEmitter> &emt, int skip_count)
-      : skip_count_(skip_count)
-    {
-      cxt_ = cxt;
-      emt_ = emt;
-    }
+      : cxt_(cxt), emt_(emt), skip_count_(skip_count)
+    {}
 
-    void add_phase_duration_final(const std::string frame_id, double duration_secs, const mu_type &mu_final)
+    void add_phase_duration_final(const std::string &frame_id, double duration_secs, const mu_type &mu_final)
     {
       // calculate the step_count
       int step_count = static_cast<int>(std::ceil(duration_secs * 1000. / Context::timer_interval_milliseconds_));
       step_count = std::max(step_count, 1);
 
       // Add the phase to the list.
-      phases_.emplace(phases_.end(), AnimationPhase{step_count, frame_id, mu_final});
+      phases_.emplace_back(AnimationPhase{step_count, frame_id, mu_final});
     }
 
     int step()
@@ -651,44 +639,48 @@ namespace rviz_doodles
 
   class RvizDoodlesNode : public rclcpp::Node
   {
-    const int timer_interval_milliseconds_ = 100;
+    int skip_count_ = 0;
 
     rclcpp::TimerBase::SharedPtr timer_sub_;
-    int skip_count_ = 0;
 
     std::shared_ptr<Context> cxt_;
     std::shared_ptr<IEmitter> emt_;
     std::shared_ptr<IAnimation> ani_;
 
   public:
-
-    explicit RvizDoodlesNode()
+    RvizDoodlesNode()
       : Node("rviz_doodles_node")
     {
-      auto timer_pub_cb = std::bind(&RvizDoodlesNode::timer_callback, this);
-      timer_sub_ = create_wall_timer(std::chrono::milliseconds(timer_interval_milliseconds_), timer_pub_cb);
+      auto result = rcutils_logging_set_logger_level(get_logger().get_name(), RCUTILS_LOG_SEVERITY_INFO);
 
       cxt_ = std::make_shared<Context>(*this);
+
+     emt_ = std::make_shared<MapFrameEmitter>(cxt_);
+//     emt_ = std::make_shared<Tf2Emitter>(cxt_);
+
+//     ani_ = std::make_shared<BasicAxes>(cxt_, emt_);
+//     ani_ = std::make_shared<BasicMarkers>(cxt_, emt_);
+//     ani_ = std::make_shared<RotatingAxes>(cxt_, emt_);
+     ani_ = std::make_shared<DroneModel>(cxt_, emt_);
+
+
+      auto ms = Context::timer_interval_milliseconds_;
+      auto timer_sub_lambda = [this]() -> void
+      {
+        if (this->skip_count_-- <= 0) {
+          this->skip_count_ = this->ani_->step();
+        }
+      };
+      timer_sub_ = create_wall_timer(std::chrono::milliseconds(ms), timer_sub_lambda);
 
       RCLCPP_INFO(get_logger(), "rviz_doodles_node ready");
     }
 
-  private:
-    void timer_callback()
+    ~RvizDoodlesNode()
     {
-      if (!emt_) {
-        emt_ = std::make_shared<MapFrameEmitter>(cxt_, "rviz_doodle");
-//        emt_ = std::make_shared<Tf2Emitter>(cxt_, "rviz_doodle");
-      }
-      if (!ani_) {
-//        ani_ = std::make_shared<BasicAxes>(cxt_, emt_);
-//        ani_ = std::make_shared<BasicMarkers>(cxt_, emt_);
-//        ani_ = std::make_shared<RotatingAxes>(cxt_, emt_);
-        ani_ = std::make_shared<DroneModel>(cxt_, emt_);
-      }
-      if (skip_count_-- <= 0) {
-        skip_count_ = ani_->step();
-      }
+      RCLCPP_INFO(get_logger(), "rviz_doodles_node shutting down");
+
+      timer_sub_->cancel();
     }
   };
 }
@@ -704,18 +696,13 @@ int main(int argc, char **argv)
 
   // Init ROS
   rclcpp::init(argc, argv);
+  rclcpp::install_signal_handlers();
 
-  // Create node
-  auto node = std::make_shared<rviz_doodles::RvizDoodlesNode>();
-  auto result = rcutils_logging_set_logger_level(node->get_logger().get_name(), RCUTILS_LOG_SEVERITY_INFO);
-
-  // Spin until rclcpp::ok() returns false
-  rclcpp::spin(node);
-
-  // Shut down the Node
-  node.reset();
+  // Spin until rclcpp::ok() returns false.
+  rclcpp::spin(std::make_shared<rviz_doodles::RvizDoodlesNode>());
 
   // Shut down ROS
+  rclcpp::uninstall_signal_handlers();
   rclcpp::shutdown();
 
   return 0;

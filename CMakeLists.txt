@@ -57,7 +57,7 @@ endif()
 
 add_executable(${PROJECT_NAME}
   src/rviz_doodles.cpp
-  src/TransformWithCovariance.cpp)
+  src/transform_with_covariance.cpp)
 
 ament_target_dependencies(${PROJECT_NAME}
   geometry_msgs

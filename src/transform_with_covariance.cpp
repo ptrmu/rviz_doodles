@@ -1,10 +1,7 @@
-//
-// Created by peter on 2/22/19.
-//
 
-#include "TransformWithCovariance.hpp"
+#include "transform_with_covariance.hpp"
 
-void TransformWithCovariance::update_simple_average(TransformWithCovariance &newVal, int previous_update_count)
+void TransformWithCovariance::update_simple_average(const TransformWithCovariance &newVal, int previous_update_count)
 {
   double previous_weight = double(previous_update_count) / (previous_update_count + 1);
   double current_weight = 1.0 / (previous_update_count + 1);

@@ -1,7 +1,3 @@
-//
-// Created by peter on 2/18/19.
-//
-
 #ifndef _TRANSFORMWITHCOVARIANCE_HPP
 #define _TRANSFORMWITHCOVARIANCE_HPP
 
@@ -20,7 +16,7 @@ private:
   tf2::Transform transform_;
   cov_type cov_;
 
-  static tf2::Transform transformFromMu(const mu_type &mu)
+  static tf2::Transform to_transform(const mu_type &mu)
   {
     tf2::Quaternion q;
     q.setRPY(mu[3], mu[4], mu[5]);
@@ -28,23 +24,25 @@ private:
   }
 
 public:
+  TransformWithCovariance() = default;
+
   TransformWithCovariance(const tf2::Transform &transform, const cov_type &cov)
     : is_valid_(true), transform_(transform), cov_(cov)
   {}
 
-  TransformWithCovariance(const tf2::Transform &transform)
-    : is_valid_(true), transform_(transform)
+  explicit TransformWithCovariance(const tf2::Transform &transform)
+    : is_valid_(true), transform_(transform), cov_()
   {}
 
   TransformWithCovariance(const mu_type &mu, const cov_type &cov)
-    : is_valid_(true), transform_(transformFromMu(mu)), cov_(cov)
+    : is_valid_(true), transform_(to_transform(mu)), cov_(cov)
   {}
 
-  TransformWithCovariance(const mu_type &mu)
-    : is_valid_(true), transform_(transformFromMu(mu))
+  explicit TransformWithCovariance(const mu_type &mu)
+    : is_valid_(true), transform_(to_transform(mu)), cov_()
   {}
 
-  TransformWithCovariance(const tf2::Quaternion &q)
+  explicit TransformWithCovariance(const tf2::Quaternion &q)
     : is_valid_(true), transform_(q), cov_()
   {}
 
@@ -55,10 +53,10 @@ public:
   auto is_valid() const
   { return is_valid_; }
 
-  auto transform() const
+  auto &transform() const
   { return transform_; }
 
-  auto cov() const
+  auto &cov() const
   { return cov_; }
 
   mu_type mu() const
@@ -69,8 +67,7 @@ public:
     return mu_type{c[0], c[1], c[2], roll, pitch, yaw};
   }
 
-  void update_simple_average(TransformWithCovariance &newVal, int previous_update_count);
+  void update_simple_average(const TransformWithCovariance &newVal, int previous_update_count);
 };
-
 
 #endif //_TRANSFORMWITHCOVARIANCE_HPP

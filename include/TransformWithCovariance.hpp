@@ -5,6 +5,8 @@
 #ifndef _TRANSFORMWITHCOVARIANCE_HPP
 #define _TRANSFORMWITHCOVARIANCE_HPP
 
+#include <array>
+
 #include "tf2/LinearMath/Transform.h"
 
 class TransformWithCovariance
@@ -64,7 +66,7 @@ public:
     double roll, pitch, yaw;
     transform_.getBasis().getRPY(roll, pitch, yaw);
     auto c = transform_.getOrigin();
-    return mu_type {c[0], c[1], c[2], roll, pitch, yaw};
+    return mu_type{c[0], c[1], c[2], roll, pitch, yaw};
   }
 
   void update_simple_average(TransformWithCovariance &newVal, int previous_update_count);

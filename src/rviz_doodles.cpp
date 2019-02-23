@@ -655,8 +655,8 @@ namespace rviz_doodles
 
       cxt_ = std::make_shared<Context>(*this);
 
-     emt_ = std::make_shared<MapFrameEmitter>(cxt_);
-//     emt_ = std::make_shared<Tf2Emitter>(cxt_);
+//     emt_ = std::make_shared<MapFrameEmitter>(cxt_);
+     emt_ = std::make_shared<Tf2Emitter>(cxt_);
 
 //     ani_ = std::make_shared<BasicAxes>(cxt_, emt_);
 //     ani_ = std::make_shared<BasicMarkers>(cxt_, emt_);
